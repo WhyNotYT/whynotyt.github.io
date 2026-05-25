@@ -238,6 +238,11 @@ class SharedDspProcessor extends AudioWorkletProcessor {
     return true;
   }
 
+  softLimit(sample) {
+    if (!Number.isFinite(sample)) return 0;
+    return Math.tanh(sample * 0.9);
+  }
+
   processIir(input, output) {
     const inputChannels = input[0] || [];
     const outputChannels = output[0] || [];
@@ -264,9 +269,7 @@ class SharedDspProcessor extends AudioWorkletProcessor {
             (a[k + 1] || 0) * outSample +
             (w[k + 1] || 0);
         }
-        y[i] = Number.isFinite(outSample)
-          ? Math.max(-2, Math.min(2, outSample))
-          : 0;
+        y[i] = this.softLimit(outSample);
       }
     }
     return true;
