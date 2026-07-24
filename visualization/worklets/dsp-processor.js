@@ -20,6 +20,7 @@ class SharedDspProcessor extends AudioWorkletProcessor {
     };
     this.lpState = [];
     this.holdState = [];
+    this.reconState = [];
     this.lpAlpha = 0.5;
 
     this.port.onmessage = (event) => {
@@ -60,9 +61,11 @@ class SharedDspProcessor extends AudioWorkletProcessor {
           message.sourceSampleRate || sampleRate,
         );
         this.updateLPFCoefficients();
+        this.updateReconLPFCoefficients();
       }
     };
     this.updateLPFCoefficients();
+    this.updateReconLPFCoefficients();
   }
 
   resetIirState() {
@@ -94,6 +97,18 @@ class SharedDspProcessor extends AudioWorkletProcessor {
         y2b: 0,
       });
     }
+    while (this.reconState.length < channelCount) {
+      this.reconState.push({
+        x1a: 0,
+        x2a: 0,
+        y1a: 0,
+        y2a: 0,
+        x1b: 0,
+        x2b: 0,
+        y1b: 0,
+        y2b: 0,
+      });
+    }
     while (this.holdState.length < channelCount) {
       this.holdState.push({ held: 0, countdown: 0 });
     }
@@ -101,17 +116,65 @@ class SharedDspProcessor extends AudioWorkletProcessor {
 
   updateLPFCoefficients() {
     const fc = Math.min(this.aliasing.lpfCutoff, sampleRate * 0.49);
+    const coeffs = this.biquadLowpassCoeffs(fc);
+    this.b0 = coeffs.b0;
+    this.b1 = coeffs.b1;
+    this.b2 = coeffs.b2;
+    this.a1 = coeffs.a1;
+    this.a2 = coeffs.a2;
+  }
+
+  updateReconLPFCoefficients() {
+    const nyquist = this.aliasing.targetSampleRate / 2;
+    const fc = Math.min(Math.max(20, nyquist), sampleRate * 0.49);
+    const coeffs = this.biquadLowpassCoeffs(fc);
+    this.reconB0 = coeffs.b0;
+    this.reconB1 = coeffs.b1;
+    this.reconB2 = coeffs.b2;
+    this.reconA1 = coeffs.a1;
+    this.reconA2 = coeffs.a2;
+  }
+
+  biquadLowpassCoeffs(fc) {
     const q = 0.707;
     const w0 = (2 * Math.PI * fc) / sampleRate;
     const cw = Math.cos(w0);
     const sw = Math.sin(w0);
     const alpha = sw / (2 * q);
     const a0 = 1 + alpha;
-    this.b0 = ((1 - cw) / 2) / a0;
-    this.b1 = (1 - cw) / a0;
-    this.b2 = ((1 - cw) / 2) / a0;
-    this.a1 = (-2 * cw) / a0;
-    this.a2 = (1 - alpha) / a0;
+    return {
+      b0: ((1 - cw) / 2) / a0,
+      b1: (1 - cw) / a0,
+      b2: ((1 - cw) / 2) / a0,
+      a1: (-2 * cw) / a0,
+      a2: (1 - alpha) / a0,
+    };
+  }
+
+  applyReconstructionLPF(sample, channel) {
+    const s = this.reconState[channel];
+    const ya =
+      this.reconB0 * sample +
+      this.reconB1 * s.x1a +
+      this.reconB2 * s.x2a -
+      this.reconA1 * s.y1a -
+      this.reconA2 * s.y2a;
+    s.x2a = s.x1a;
+    s.x1a = sample;
+    s.y2a = s.y1a;
+    s.y1a = ya;
+
+    const yb =
+      this.reconB0 * ya +
+      this.reconB1 * s.x1b +
+      this.reconB2 * s.x2b -
+      this.reconA1 * s.y1b -
+      this.reconA2 * s.y2b;
+    s.x2b = s.x1b;
+    s.x1b = ya;
+    s.y2b = s.y1b;
+    s.y1b = yb;
+    return yb;
   }
 
   processAliasing(inputs, outputs) {
@@ -177,6 +240,12 @@ class SharedDspProcessor extends AudioWorkletProcessor {
         let out = processed;
         if (diffMode) {
           out = doDownsample ? aliasedNoQuant - yb : 0;
+        } else if (doDownsample) {
+          // Four cascaded biquads at target Nyquist — removes ZOH imaging
+          // so playback at the native device rate sounds like true
+          // band-limited reconstruction (matching offline decimation).
+          out = this.applyReconstructionLPF(processed, ch);
+          out = this.applyReconstructionLPF(out, ch);
         }
         y[i] = Number.isFinite(out) ? Math.max(-1, Math.min(1, out)) : 0;
       }
