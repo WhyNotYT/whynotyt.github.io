@@ -11,6 +11,8 @@ class SharedDspProcessor extends AudioWorkletProcessor {
     this.iirB = [1];
     this.iirA = [1];
     this.iirStates = [];
+    this.modFrequency = 10;
+    this.modPhase = 0;
     this.aliasing = {
       lpfCutoff: 22050,
       targetSampleRate: 32000,
@@ -44,6 +46,12 @@ class SharedDspProcessor extends AudioWorkletProcessor {
         this.iirB = Array.isArray(message.b) && message.b.length ? message.b : [1];
         this.iirA = Array.isArray(message.a) && message.a.length ? message.a : [1];
         this.resetIirState();
+      } else if (message.type === "setModulation") {
+        this.modFrequency = Math.max(
+          0,
+          Number.isFinite(message.frequency) ? message.frequency : 10,
+        );
+        if (Number.isFinite(message.phase)) this.modPhase = message.phase;
       } else if (message.type === "resetPhase") {
         this.phase = 0;
         this.toneTime = 0;
@@ -312,6 +320,27 @@ class SharedDspProcessor extends AudioWorkletProcessor {
     return Math.tanh(sample * 0.9);
   }
 
+  processAmplitudeMod(input, output) {
+    const inputChannels = input[0] || [];
+    const outputChannels = output[0] || [];
+    const channelCount = outputChannels.length;
+    if (channelCount === 0) return true;
+    const twoPiF = (2 * Math.PI * this.modFrequency) / sampleRate;
+    let phase = this.modPhase;
+    for (let ch = 0; ch < channelCount; ch++) {
+      const x = inputChannels[ch] || inputChannels[0];
+      const y = outputChannels[ch];
+      if (!x || !y) continue;
+      for (let i = 0; i < y.length; i++) {
+        const mod = Math.cos(phase);
+        phase += twoPiF;
+        y[i] = this.softLimit((x[i] || 0) * mod);
+      }
+    }
+    this.modPhase = phase % (2 * Math.PI);
+    return true;
+  }
+
   processIir(input, output) {
     const inputChannels = input[0] || [];
     const outputChannels = output[0] || [];
@@ -353,6 +382,9 @@ class SharedDspProcessor extends AudioWorkletProcessor {
     }
     if (this.mode === "iir") {
       return this.processIir(inputs, outputs);
+    }
+    if (this.mode === "amplitude-mod") {
+      return this.processAmplitudeMod(inputs, outputs);
     }
     if (this.mode === "alias-processed" || this.mode === "alias-diff") {
       return this.processAliasing(inputs, outputs);
