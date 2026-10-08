@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Battery Music</title>
+<style>
+  body { font-family: sans-serif; max-width: 700px; margin: 2rem auto; padding: 0 1rem; }
+  #start { font-size: 1.1rem; padding: 0.5rem 1.2rem; margin-bottom: 1rem; }
+  #status { margin-left: 0.5rem; color: #666; }
+  .batteries { display: flex; gap: 1.5rem; flex-wrap: wrap; }
+  .battery { border: 2px solid #444; border-radius: 8px; padding: 0.8rem 1.2rem; min-width: 150px; }
+  .battery h2 { margin: 0 0 0.5rem; }
+  label { display: block; padding: 0.25rem 0; cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>Battery Music</h1>
+<button id="start">Start</button><span id="status"></span>
+
+<div class="batteries" id="batteries"></div>
+
+<script>
+const BASE = "https://whynotyt.github.io/BatteryMusic/";
+const FADE = 0.4; // seconds
+
+const BATTERIES = {
+  LFP: ["Lithium", "Iron", "Phosphate"],
+  NMC: ["Nickel", "Manganese", "Cobalt"],
+  NCA: ["Nickel", "Cobalt", "Aluminium"]
+};
+const STEMS = ["Aluminium", "Cobalt", "Iron", "Lithium", "Manganese", "Nickel", "Phosphate"];
+
+const enabled = {}; // element -> boolean (shared across batteries)
+STEMS.forEach(s => enabled[s] = false);
+
+// Build UI
+const container = document.getElementById("batteries");
+for (const [name, elements] of Object.entries(BATTERIES)) {
+  const div = document.createElement("div");
+  div.className = "battery";
+  div.innerHTML = `<h2>${name}</h2>`;
+  elements.forEach(el => {
+    const label = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.dataset.element = el;
+    cb.addEventListener("change", () => setElement(el, cb.checked));
+    label.appendChild(cb);
+    label.append(" " + el);
+    div.appendChild(label);
+  });
+  container.appendChild(div);
+}
+
+function setElement(el, on) {
+  enabled[el] = on;
+  // sync all checkboxes for this element (shared between NMC and NCA)
+  document.querySelectorAll(`input[data-element="${el}"]`).forEach(c => c.checked = on);
+  applyGain(el);
+}
+
+// Audio
+let ctx = null;
+const gains = {};
+let started = false;
+
+function applyGain(el) {
+  if (!ctx || !gains[el]) return;
+  const g = gains[el].gain;
+  const t = ctx.currentTime;
+  g.cancelScheduledValues(t);
+  g.setValueAtTime(g.value, t);
+  g.linearRampToValueAtTime(enabled[el] ? 1 : 0, t + FADE);
+}
+
+async function start() {
+  const btn = document.getElementById("start");
+  const status = document.getElementById("status");
+  if (started) return;
+  btn.disabled = true;
+  status.textContent = "Loading stems...";
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  try {
+    const buffers = await Promise.all(STEMS.map(async s => {
+      const res = await fetch(`${BASE}${s}.wav`);
+      if (!res.ok) throw new Error(`${s}.wav: HTTP ${res.status}`);
+      return ctx.decodeAudioData(await res.arrayBuffer());
+    }));
+    const when = ctx.currentTime + 0.1; // start everything at the same instant
+    STEMS.forEach((s, i) => {
+      const src = ctx.createBufferSource();
+      src.buffer = buffers[i];
+      src.loop = true;
+      const gain = ctx.createGain();
+      gain.gain.value = enabled[s] ? 1 : 0;
+      src.connect(gain).connect(ctx.destination);
+      src.start(when);
+      gains[s] = gain;
+    });
+    started = true;
+    btn.textContent = "Playing";
+    status.textContent = "";
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("start").addEventListener("click", start);
+</script>
+</body>
+</html>
